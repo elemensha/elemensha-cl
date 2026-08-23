@@ -280,6 +280,35 @@ class BinanceFutures:
         bal = self.client.fetch_balance(params={"type": "future"})
         return float(bal["total"].get("USDT") or 0.0)
 
+    def account_summary(self) -> dict[str, Any]:
+        """
+        계좌 전체 스냅샷. 잔고 그래프의 원천 데이터.
+
+        지갑 잔고만 보면 이 전략의 실제 상태를 놓친다. 손절이 없어서
+        포지션이 깊이 물려 있어도 지갑 잔고는 그대로이기 때문이다.
+        순자산(= 지갑 + 미실현손익)을 함께 기록해야 진짜 곡선이 보인다.
+        """
+        try:
+            info = self.client.fapiPrivateV2GetAccount()
+        except Exception as exc:  # noqa: BLE001
+            raise ExchangeError(f"계좌 조회 실패: {exc}") from exc
+
+        wallet = _f(info.get("totalWalletBalance")) or 0.0
+        unrealized = _f(info.get("totalUnrealizedProfit")) or 0.0
+        return {
+            "wallet": wallet,                                        # 지갑 잔고
+            "equity": _f(info.get("totalMarginBalance")) or (wallet + unrealized),
+            "unrealizedPnl": unrealized,
+            "available": _f(info.get("availableBalance")) or 0.0,
+            "positionNotional": sum(
+                abs(_f(p.get("notional")) or 0.0) for p in info.get("positions", [])
+            ),
+            "openPositions": sum(
+                1 for p in info.get("positions", [])
+                if abs(_f(p.get("positionAmt")) or 0.0) > 0
+            ),
+        }
+
     def position(self, symbol: str) -> dict[str, Any]:
         """포지션 수량+평단을 한 번의 호출로. 원본의 2회 호출을 대체."""
         info = self.read_position_risk(symbol)

@@ -203,8 +203,11 @@ class StrategyEngine:
         lev = self.ex.apply_leverage(self.symbol, self.cfg.leverage)
         mar = self.ex.apply_margin_mode(self.symbol, self.cfg.margin_mode)
         for result in (lev, mar):
-            self.log("info" if result["verified"] else "error", result["message"],
-                     **result)
+            # result 에 이미 'message' 키가 있으므로 그대로 펼치면
+            # log(level, message, **data) 의 message 인자와 충돌한다.
+            data = {k: v for k, v in result.items() if k != "message"}
+            self.log("info" if result["verified"] else "error",
+                     result["message"], **data)
         return {"leverage": lev, "marginMode": mar}
 
     # --------------------------------------------------------------- RSI 계산

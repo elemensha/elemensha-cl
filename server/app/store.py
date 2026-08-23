@@ -44,6 +44,15 @@ CREATE TABLE IF NOT EXISTS events (
     data      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts DESC);
+CREATE TABLE IF NOT EXISTS balance_history (
+    ts                REAL PRIMARY KEY,
+    wallet            REAL NOT NULL,
+    equity            REAL NOT NULL,
+    unrealized_pnl    REAL NOT NULL DEFAULT 0,
+    position_notional REAL NOT NULL DEFAULT 0,
+    open_positions    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_balance_ts ON balance_history(ts);
 CREATE TABLE IF NOT EXISTS bots (
     symbol     TEXT PRIMARY KEY,
     config     TEXT NOT NULL,
@@ -249,6 +258,80 @@ class Store:
     def delete_bot(self, symbol: str) -> None:
         self.db.execute("DELETE FROM bots WHERE symbol=?", (symbol,))
         self.db.commit()
+
+    # ------------------------------------------------------------ 잔고 기록
+
+    def add_balance_point(self, snapshot: dict[str, Any]) -> None:
+        """계좌 스냅샷 1건 기록. 5분마다 호출된다."""
+        self.db.execute(
+            "INSERT OR REPLACE INTO balance_history"
+            "(ts, wallet, equity, unrealized_pnl, position_notional, open_positions)"
+            " VALUES(?,?,?,?,?,?)",
+            (time.time(),
+             float(snapshot.get("wallet") or 0.0),
+             float(snapshot.get("equity") or 0.0),
+             float(snapshot.get("unrealizedPnl") or 0.0),
+             float(snapshot.get("positionNotional") or 0.0),
+             int(snapshot.get("openPositions") or 0)),
+        )
+        self.db.commit()
+
+    def prune_balance_history(self, keep_days: int = 730) -> int:
+        """오래된 기록 정리. 5분 간격이면 2년치가 약 21만 행(수 MB)."""
+        cutoff = time.time() - keep_days * 86400
+        cur = self.db.execute("DELETE FROM balance_history WHERE ts < ?", (cutoff,))
+        self.db.commit()
+        return cur.rowcount
+
+    def balance_series(self, since: float, bucket_seconds: int) -> list[dict[str, Any]]:
+        """
+        구간별로 묶은 잔고 시계열.
+
+        각 구간의 '마지막' 값을 쓴다 — 종가 개념. 평균을 내면 급변이
+        뭉개져서 실제로 무슨 일이 있었는지 안 보인다.
+        """
+        rows = self.db.execute(
+            "SELECT"
+            "  CAST(ts / ? AS INTEGER) * ? AS bucket,"
+            "  MAX(ts) AS last_ts,"
+            "  MIN(equity) AS low,"
+            "  MAX(equity) AS high,"
+            "  COUNT(*) AS samples"
+            " FROM balance_history WHERE ts >= ?"
+            " GROUP BY bucket ORDER BY bucket",
+            (bucket_seconds, bucket_seconds, since),
+        ).fetchall()
+
+        out = []
+        for r in rows:
+            last = self.db.execute(
+                "SELECT wallet, equity, unrealized_pnl, position_notional,"
+                " open_positions FROM balance_history WHERE ts = ?",
+                (r["last_ts"],),
+            ).fetchone()
+            if not last:
+                continue
+            out.append({
+                "ts": r["bucket"],
+                "wallet": last["wallet"],
+                "equity": last["equity"],
+                "unrealizedPnl": last["unrealized_pnl"],
+                "positionNotional": last["position_notional"],
+                "openPositions": last["open_positions"],
+                "low": r["low"],
+                "high": r["high"],
+                "samples": r["samples"],
+            })
+        return out
+
+    def balance_range(self) -> dict[str, Any]:
+        """기록이 언제부터 있는지. 앱에서 '데이터 부족' 안내에 쓴다."""
+        row = self.db.execute(
+            "SELECT MIN(ts) AS first_ts, MAX(ts) AS last_ts, COUNT(*) AS n"
+            " FROM balance_history"
+        ).fetchone()
+        return {"firstTs": row["first_ts"], "lastTs": row["last_ts"],
+                "count": row["n"] or 0}
 
 
 def mask(value: str | None, keep: int = 4) -> str:

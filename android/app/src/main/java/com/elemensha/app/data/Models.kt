@@ -162,6 +162,53 @@ data class CredentialInfo(
     val canTrade: Boolean? = null,
 )
 
+// ------------------------------------------------------------- 잔고 그래프
+
+@Serializable
+data class BalancePoint(
+    val ts: Double = 0.0,
+    val wallet: Double = 0.0,
+    /** 지갑 + 미실현손익. 손절이 없는 전략이라 이 값이 진짜 성과다. */
+    val equity: Double = 0.0,
+    val unrealizedPnl: Double = 0.0,
+    val positionNotional: Double = 0.0,
+    val openPositions: Int = 0,
+    val low: Double = 0.0,
+    val high: Double = 0.0,
+    val samples: Int = 0,
+)
+
+@Serializable
+data class BalanceSummary(
+    val startEquity: Double? = null,
+    val endEquity: Double? = null,
+    val change: Double? = null,
+    val changePercent: Double? = null,
+    val minEquity: Double? = null,
+    val maxEquity: Double? = null,
+    val wallet: Double? = null,
+    val unrealizedPnl: Double? = null,
+    val positionNotional: Double? = null,
+    val openPositions: Int? = null,
+)
+
+@Serializable
+data class RecordingInfo(
+    val firstTs: Double? = null,
+    val totalSamples: Int = 0,
+    val intervalSeconds: Int = 300,
+)
+
+@Serializable
+data class BalanceHistory(
+    val period: String = "week",
+    val label: String = "",
+    val bucketSeconds: Int = 86400,
+    val points: List<BalancePoint> = emptyList(),
+    val summary: BalanceSummary = BalanceSummary(),
+    val recording: RecordingInfo = RecordingInfo(),
+)
+
 @Serializable
 data class Event(
     val id: Long = 0,

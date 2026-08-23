@@ -24,6 +24,7 @@ import com.elemensha.app.ui.*
 
 private enum class Tab(val route: String, val label: String, val icon: ImageVector) {
     Dashboard("dashboard", "대시보드", Icons.Default.Dashboard),
+    Chart("chart", "잔고", Icons.Default.ShowChart),
     Config("config", "설정", Icons.Default.Tune),
     Logs("logs", "로그", Icons.Default.Article),
     More("more", "더보기", Icons.Default.MoreHoriz),
@@ -110,6 +111,7 @@ private fun MainScaffold(vm: AppViewModel) {
             modifier = Modifier.padding(padding),
         ) {
             composable(Tab.Dashboard.route) { DashboardScreen(vm, state) }
+            composable(Tab.Chart.route) { ChartScreen(vm, state) }
             composable(Tab.Config.route) { ConfigScreen(vm, state) }
             composable(Tab.Logs.route) { LogScreen(state) }
             composable(Tab.More.route) {

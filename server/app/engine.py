@@ -105,9 +105,14 @@ class BotRunner:
                 # 연속 실패 시 백오프 (무료 서버 + 거래소 레이트리밋 보호)
                 await asyncio.sleep(min(300, 10 * self.consecutive_errors))
 
-            persist_counter += 1
-            if persist_counter % 10 == 0:
-                self.sup.persist(self)
+            # 상태 저장이나 스케줄링이 실패해도 봇은 계속 살아 있어야 한다.
+            # 이 구간이 보호되지 않으면 태스크가 조용히 죽어 매매가 멈춘다.
+            try:
+                persist_counter += 1
+                if persist_counter % 10 == 0:
+                    self.sup.persist(self)
+            except Exception as exc:  # noqa: BLE001
+                self._emit("warn", f"상태 저장 실패(무시하고 계속): {exc}", {})
 
             elapsed = time.monotonic() - started
             await asyncio.sleep(max(1.0, self.cfg.poll_seconds - elapsed))
@@ -135,12 +140,16 @@ class BotRunner:
 class Supervisor:
     """전체 봇 + 자격증명 + 이벤트 브로드캐스트 관리."""
 
+    SNAPSHOT_INTERVAL = 300   # 5분. 하루 288건, 2년치가 수 MB 수준이다.
+
     def __init__(self, store: Store):
         self.store = store
         self.bots: dict[str, BotRunner] = {}
         self._subscribers: set[Callable[[dict[str, Any]], None]] = set()
         self._symbol_cache: list[dict[str, Any]] | None = None
         self._symbol_cache_at = 0.0
+        self._snapshot_task: asyncio.Task | None = None
+        self.last_snapshot: dict[str, Any] | None = None
 
     # ------------------------------------------------------- 자격증명 [7]
 
@@ -150,6 +159,7 @@ class Supervisor:
         self.store.put_secret("binance_api_secret", api_secret)
         self.store.put("binance_testnet", bool(testnet))
         self._symbol_cache = None
+        self.start_snapshots()
 
     def clear_credentials(self) -> None:
         self.store.delete_secret("binance_api_key")
@@ -270,12 +280,54 @@ class Supervisor:
     def status_one(self, symbol: str) -> dict[str, Any]:
         return self._require(symbol).status()
 
+    # ------------------------------------------------------- 잔고 스냅샷
+
+    async def snapshot_once(self) -> dict[str, Any] | None:
+        """계좌 스냅샷 1건을 찍어 기록한다. 봇 실행 여부와 무관하다."""
+        if not self.has_credentials():
+            return None
+        try:
+            exchange = self.new_exchange()
+            summary = await asyncio.to_thread(exchange.account_summary)
+        except Exception as exc:  # noqa: BLE001 - 일시적 장애로 루프가 죽으면 안 된다
+            log_data = {"error": str(exc)}
+            self.publish("warn", f"잔고 스냅샷 실패: {exc}", None, log_data)
+            return None
+        self.store.add_balance_point(summary)
+        self.last_snapshot = summary
+        return summary
+
+    async def _snapshot_loop(self) -> None:
+        """
+        봇이 멈춰 있어도 잔고 곡선은 계속 이어져야 하므로
+        봇 태스크와 분리해서 돌린다.
+        """
+        prune_counter = 0
+        while True:
+            try:
+                await self.snapshot_once()
+                prune_counter += 1
+                if prune_counter % 288 == 0:      # 하루에 한 번 정리
+                    await asyncio.to_thread(self.store.prune_balance_history)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                pass
+            await asyncio.sleep(self.SNAPSHOT_INTERVAL)
+
+    def start_snapshots(self) -> None:
+        if self._snapshot_task is None or self._snapshot_task.done():
+            self._snapshot_task = asyncio.create_task(
+                self._snapshot_loop(), name="balance-snapshots"
+            )
+
     # -------------------------------------------------------------- 부팅
 
     async def restore_on_boot(self) -> None:
         """서버 재시작 후 켜져 있던 봇을 자동 복구."""
         if not self.has_credentials():
             return
+        self.start_snapshots()
         for saved in self.store.load_bots():
             if not saved["enabled"]:
                 continue
@@ -290,6 +342,8 @@ class Supervisor:
                              saved["symbol"])
 
     async def shutdown(self) -> None:
+        if self._snapshot_task:
+            self._snapshot_task.cancel()
         for runner in list(self.bots.values()):
             runner.running = False
             if runner.task:

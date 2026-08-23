@@ -62,7 +62,15 @@ for other in elemensha elemensha-bot; do
   fi
 done
 if ss -ltn 2>/dev/null | grep -q ":${APP_PORT}\b"; then
-  die "포트 ${APP_PORT} 가 이미 사용 중입니다. APP_PORT=<다른포트> 로 다시 실행하세요."
+  # 재배포일 때는 우리 서비스가 그 포트를 쓰고 있는 게 정상이다.
+  # 남의 서비스가 물고 있을 때만 중단한다.
+  if systemctl is-active --quiet "$APP_NAME" 2>/dev/null; then
+    echo "  포트 ${APP_PORT} 는 기존 ${APP_NAME} 가 사용 중 — 재배포로 진행합니다."
+  else
+    die "포트 ${APP_PORT} 를 다른 프로세스가 사용 중입니다.
+  확인: sudo ss -ltnp | grep :${APP_PORT}
+  다른 포트로: sudo APP_PORT=<포트> bash oracle-setup.sh"
+  fi
 fi
 echo "  설치 이름: ${APP_NAME}   포트: ${APP_PORT}   경로: ${APP_DIR}"
 

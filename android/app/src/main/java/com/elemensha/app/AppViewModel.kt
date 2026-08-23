@@ -39,6 +39,10 @@ data class UiState(
     val busy: Boolean = false,
 
     val updateState: Updater.State = Updater.State.Idle,
+
+    /** 잔고 그래프 */
+    val balanceHistory: BalanceHistory? = null,
+    val balancePeriod: String = "week",
 )
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
@@ -131,7 +135,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         runCatching { api.credentials() }.onSuccess { c -> update { it.copy(credentials = c) } }
         runCatching { api.bots() }.onSuccess { b -> update { it.copy(bots = b.bots) } }
         runCatching { api.events(200) }.onSuccess { e -> update { it.copy(events = e.events) } }
-        if (_state.value.credentials.configured) loadSymbols()
+        if (_state.value.credentials.configured) {
+            loadSymbols()
+            loadBalanceHistory()
+        }
     }
 
     // ---------------------------------------------------------- API 키 [7]
@@ -264,6 +271,24 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 .onFailure { fail(it) }
         }
+
+    // ---------------------------------------------------------- 잔고 그래프
+
+    fun loadBalanceHistory(period: String? = null) = viewModelScope.launch {
+        val target = period ?: _state.value.balancePeriod
+        if (period != null) update { it.copy(balancePeriod = target) }
+        runCatching { api.balanceHistory(target) }
+            .onSuccess { h -> update { it.copy(balanceHistory = h) } }
+            .onFailure { update { s -> s.copy(error = it.message) } }
+    }
+
+    /** 지금 즉시 한 점 기록하고 그래프를 다시 불러온다. */
+    fun snapshotNow() = viewModelScope.launch {
+        update { it.copy(busy = true) }
+        runCatching { api.snapshotNow() }
+            .onSuccess { update { it.copy(busy = false) }; loadBalanceHistory() }
+            .onFailure { fail(it) }
+    }
 
     // ------------------------------------------------------------ 업데이트
 

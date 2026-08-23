@@ -185,6 +185,13 @@ class Api(private val prefs: Prefs) {
     suspend fun deleteBot(symbol: String): String =
         call(builder("/api/bots/${encode(symbol)}").delete().build())
 
+    // ------------------------------------------------------------ 잔고 그래프
+
+    suspend fun balanceHistory(period: String): BalanceHistory =
+        get("/api/balance/history?period=$period")
+
+    suspend fun snapshotNow(): JsonObject = post("/api/balance/snapshot")
+
     // ---------------------------------------------------------------- 이벤트
 
     suspend fun events(limit: Int = 200): EventsResponse = get("/api/events?limit=$limit")

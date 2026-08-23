@@ -371,6 +371,87 @@ async def panic_all() -> dict[str, Any]:
     return {"results": await supervisor.panic_all()}
 
 
+# ------------------------------------------------------------ 잔고 그래프
+
+# 기간별 조회 창과 묶음 단위.
+# 일별=최근 24시간을 1시간 단위, 주별=7일을 1일, 월별=30일을 1일,
+# 분기/연간은 더 길게 묶어 점 개수를 100개 안팎으로 유지한다.
+BALANCE_PERIODS: dict[str, tuple[int, int, str]] = {
+    "day":     (86400,          3600,   "최근 24시간 · 1시간 단위"),
+    "week":    (7 * 86400,      86400,  "최근 7일 · 1일 단위"),
+    "month":   (30 * 86400,     86400,  "최근 30일 · 1일 단위"),
+    "quarter": (90 * 86400,     3 * 86400, "최근 90일 · 3일 단위"),
+    "year":    (365 * 86400,    7 * 86400, "최근 1년 · 1주 단위"),
+}
+
+
+@app.get("/api/balance/history", dependencies=[Depends(require_token)])
+async def balance_history(period: str = Query("week")) -> dict[str, Any]:
+    """잔고·순자산 시계열. 앱의 그래프가 이걸 그린다."""
+    if period not in BALANCE_PERIODS:
+        raise HTTPException(
+            400, f"period 는 {', '.join(BALANCE_PERIODS)} 중 하나여야 합니다."
+        )
+    window, bucket, label = BALANCE_PERIODS[period]
+    since = time.time() - window
+    points = await asyncio.to_thread(store.balance_series, since, bucket)
+    meta = store.balance_range()
+
+    summary: dict[str, Any] = {
+        "startEquity": None, "endEquity": None,
+        "change": None, "changePercent": None,
+        "minEquity": None, "maxEquity": None,
+    }
+    if points:
+        first, last = points[0], points[-1]
+        start, end = first["equity"], last["equity"]
+        summary.update({
+            "startEquity": start,
+            "endEquity": end,
+            "change": end - start,
+            "changePercent": ((end - start) / start * 100.0) if start else None,
+            "minEquity": min(p["low"] for p in points),
+            "maxEquity": max(p["high"] for p in points),
+            "wallet": last["wallet"],
+            "unrealizedPnl": last["unrealizedPnl"],
+            "positionNotional": last["positionNotional"],
+            "openPositions": last["openPositions"],
+        })
+
+    return {
+        "period": period,
+        "label": label,
+        "bucketSeconds": bucket,
+        "points": points,
+        "summary": summary,
+        "recording": {
+            "firstTs": meta["firstTs"],
+            "totalSamples": meta["count"],
+            "intervalSeconds": supervisor.SNAPSHOT_INTERVAL,
+        },
+    }
+
+
+@app.post("/api/balance/snapshot", dependencies=[Depends(require_token)])
+async def balance_snapshot_now() -> dict[str, Any]:
+    """지금 즉시 한 점 기록한다. 앱에서 당겨서 새로고침할 때 쓴다."""
+    snapshot = await supervisor.snapshot_once()
+    if snapshot is None:
+        raise HTTPException(400, "API 키가 없거나 거래소 조회에 실패했습니다.")
+    return snapshot
+
+
+@app.get("/api/balance/periods", dependencies=[Depends(require_token)])
+async def balance_periods() -> dict[str, Any]:
+    return {
+        "periods": [
+            {"value": k, "label": v[2], "windowSeconds": v[0],
+             "bucketSeconds": v[1]}
+            for k, v in BALANCE_PERIODS.items()
+        ]
+    }
+
+
 # ------------------------------------------------------------------ 이벤트
 
 @app.get("/api/events", dependencies=[Depends(require_token)])
