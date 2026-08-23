@@ -1,0 +1,103 @@
+name: Android Release
+
+# v1.0.1 같은 태그를 밀면 APK를 빌드해 GitHub Releases 에 올린다.
+# 앱의 [업데이트] 버튼은 이 릴리스를 바라본다.
+#
+#   git tag v1.0.1 && git push origin v1.0.1
+#
+# 공개 저장소면 Actions 분당 요금이 무료다.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "버전 (예: 1.0.1)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 버전 결정
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          # 1.2.3 -> versionCode 10203
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          CODE=$(( ${MAJOR:-0} * 10000 + ${MINOR:-0} * 100 + ${PATCH:-0} ))
+          echo "name=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "code=$CODE"    >> "$GITHUB_OUTPUT"
+          echo "빌드 버전: $VERSION (code $CODE)"
+
+      - name: build.gradle 버전 주입
+        run: |
+          sed -i "s/versionCode = .*/versionCode = ${{ steps.version.outputs.code }}/" app/build.gradle.kts
+          sed -i "s/versionName = .*/versionName = \"${{ steps.version.outputs.name }}\"/" app/build.gradle.kts
+          grep -E "versionCode|versionName" app/build.gradle.kts
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: 서명 키 복원
+        # 저장소 Secrets 에 KEYSTORE_BASE64 가 있으면 서명된 릴리스를 만든다.
+        # 없으면 서명되지 않은 APK 가 나오므로 최초 1회는 로컬에서 키를 만들어 등록한다.
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/elemensha.jks"
+            echo "ELEMENSHA_KEYSTORE=$RUNNER_TEMP/elemensha.jks" >> "$GITHUB_ENV"
+            echo "서명 키 준비됨"
+          else
+            echo "::warning::KEYSTORE_BASE64 시크릿이 없어 서명 없이 빌드합니다."
+          fi
+
+      - name: APK 빌드
+        env:
+          ELEMENSHA_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          ELEMENSHA_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          ELEMENSHA_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: APK 이름 정리
+        id: apk
+        run: |
+          SRC=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
+          DEST="elemensha-${{ steps.version.outputs.name }}.apk"
+          cp "$SRC" "$DEST"
+          echo "path=android/$DEST" >> "$GITHUB_OUTPUT"
+          ls -lh "$DEST"
+
+      - name: 릴리스 생성
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.name }}
+          name: elemensha v${{ steps.version.outputs.name }}
+          files: ${{ steps.apk.outputs.path }}
+          generate_release_notes: true
+          body: |
+            ## elemensha v${{ steps.version.outputs.name }}
+
+            앱 안의 **더보기 > 앱 업데이트**에서 바로 받을 수 있습니다.
+            최초 설치라면 아래 APK를 내려받아 직접 설치하세요.

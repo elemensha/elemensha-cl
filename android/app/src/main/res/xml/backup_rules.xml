@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- 서버 토큰/주소는 백업에 포함하지 않는다 -->
+    <exclude domain="sharedpref" path="elemensha_secure.xml" />
+</full-backup-content>

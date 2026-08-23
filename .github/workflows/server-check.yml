@@ -1,0 +1,35 @@
+name: Server Check
+
+on:
+  push:
+    paths: ["server/**", ".github/workflows/server-check.yml"]
+  pull_request:
+    paths: ["server/**"]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: 임포트 및 설정 검증
+        run: |
+          python -c "
+          from app.main import app
+          from app.strategy import StrategyConfig, EntryTrigger, ALL_TIMEFRAMES
+          assert len(ALL_TIMEFRAMES) == 15, ALL_TIMEFRAMES
+          assert len(EntryTrigger.ALL) == 6
+          c = StrategyConfig(); c.validate()
+          assert c.max_additional_buys is None
+          routes = {r.path for r in app.routes}
+          for p in ('/api/health','/api/meta','/api/bots/start','/api/symbols'):
+              assert p in routes, p
+          print('서버 검증 통과')
+          "

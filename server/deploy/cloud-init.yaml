@@ -1,0 +1,35 @@
+#cloud-config
+# ============================================================================
+#  elemensha-claude-bot — Oracle Cloud 인스턴스 생성 시 붙이는 초기화 스크립트
+#
+#  Oracle 콘솔의 Create instance > Advanced options > Management >
+#  "Cloud-init script" 칸에 이 파일 내용을 그대로 붙여넣는다.
+#
+#  목적: 첫 부팅 시점에 스왑을 확보한다.
+#        E2.1.Micro 는 가용 RAM 이 200~370MB 수준이라, 스왑 없이 패키지 관리자를
+#        돌리면 OOM 이 나면서 sshd 까지 응답을 멈춘다. 배포 스크립트가 스왑을
+#        만들려 해도 그 전에 죽어버리므로, 아예 부팅 때 만들어 둔다.
+# ============================================================================
+
+package_update: false
+package_upgrade: false
+
+write_files:
+  - path: /etc/sysctl.d/99-elemensha.conf
+    content: |
+      # 메모리가 적으므로 스왑을 적극적으로 쓴다
+      vm.swappiness=60
+      vm.vfs_cache_pressure=50
+
+runcmd:
+  # fallocate 는 쓰지 않는다. XFS 에서 sparse 파일이 생기면
+  # swapon 이 "it appears to have holes" 로 거부한다.
+  - [ sh, -c, "test -f /extraswap || dd if=/dev/zero of=/extraswap bs=1M count=2048 status=none" ]
+  - [ chmod, "600", /extraswap ]
+  - [ sh, -c, "swapon --show=NAME --noheadings | grep -qx /extraswap || { mkswap /extraswap >/dev/null && swapon /extraswap; }" ]
+  - [ sh, -c, "grep -q /extraswap /etc/fstab || echo '/extraswap none swap sw 0 0' >> /etc/fstab" ]
+  - [ sysctl, --system ]
+  # 확인용 흔적 — ssh 접속 후 cat /var/log/elemensha-init.log 로 볼 수 있다
+  - [ sh, -c, "{ date; free -m; swapon --show; } > /var/log/elemensha-init.log 2>&1" ]
+
+final_message: "elemensha 초기화 완료 - 스왑 준비됨 ($UPTIME 초)"
