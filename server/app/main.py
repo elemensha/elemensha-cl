@@ -20,10 +20,12 @@ from fastapi import (Depends, FastAPI, Header, HTTPException, Query,
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from . import copy_api
 from .config import settings
+from .copy import CopyManager
 from .engine import Supervisor
 from .exchange import ExchangeError
-from .store import Store
+from .store import BALANCE_PERIODS, Store
 from .strategy import (ALL_TIMEFRAMES, DEFAULT_TIMEFRAMES, EntryTrigger,
                        StrategyConfig)
 
@@ -38,6 +40,8 @@ APP_VERSION_CODE = 1
 
 store = Store(settings.data_dir)
 supervisor = Supervisor(store)
+copy_manager = CopyManager(store, supervisor)
+copy_api.init(store, copy_manager)
 
 
 # --------------------------------------------------------------------- 인증
@@ -137,9 +141,13 @@ async def lifespan(_: FastAPI):
     log.info("=" * 58)
     log.info(" elemensha server v%s", APP_VERSION)
     log.info(" 페어링 코드: %s   (앱 최초 연결 시 1회 입력)", code)
+    log.info(" 팔로워 계정: %d개", len(store.load_followers()))
     log.info("=" * 58)
     await supervisor.restore_on_boot()
+    copy_manager.attach()
+    await copy_manager.restore_on_boot()
     yield
+    await copy_manager.shutdown()
     await supervisor.shutdown()
 
 
@@ -147,6 +155,7 @@ app = FastAPI(title="elemensha", version=APP_VERSION, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
+app.include_router(copy_api.router)
 
 
 @app.exception_handler(ExchangeError)
@@ -165,16 +174,22 @@ async def health() -> dict[str, Any]:
         "credentialsConfigured": supervisor.has_credentials(),
         "bots": len(supervisor.bots),
         "running": sum(1 for b in supervisor.bots.values() if b.running),
+        "followers": len(store.load_followers()),
+        "followersRunning": sum(1 for r in copy_manager.runners.values()
+                                if r.running),
         "serverTime": int(time.time() * 1000),
     }
 
 
-@app.get("/api/app/version")
-async def app_version() -> dict[str, Any]:
-    """
-    인앱 업데이트용. APK는 GitHub Releases(무료·무제한)에 호스팅하고
-    서버는 그 최신 릴리스를 중계한다. 서버가 죽어도 앱은 GitHub을 직접 볼 수 있다.
-    """
+# 한 릴리스에 APK 가 둘 올라간다. 이름으로 갈라야 팔로워 앱이 리더 앱을
+# 덮어쓰는 사고가 안 난다.
+#   리더   : elemensha-1.2.3.apk
+#   팔로워 : elemensha-copy-1.2.3.apk
+COPY_APK_MARKER = "-copy-"
+
+
+async def _release_info(want_copy: bool) -> dict[str, Any]:
+    """GitHub 최신 릴리스에서 이 앱에 맞는 APK 하나를 골라 온다."""
     fallback = {
         "versionName": APP_VERSION,
         "versionCode": APP_VERSION_CODE,
@@ -196,8 +211,14 @@ async def app_version() -> dict[str, Any]:
         log.warning("릴리스 조회 실패: %s", exc)
         return fallback
 
+    def matches(name: str) -> bool:
+        if not name.endswith(".apk"):
+            return False
+        return (COPY_APK_MARKER in name) if want_copy else (
+            COPY_APK_MARKER not in name)
+
     apk = next((a for a in data.get("assets", [])
-                if a.get("name", "").endswith(".apk")), None)
+                if matches(a.get("name", ""))), None)
     tag = str(data.get("tag_name", "")).lstrip("v")
     return {
         "versionName": tag or APP_VERSION,
@@ -208,6 +229,21 @@ async def app_version() -> dict[str, Any]:
         "publishedAt": data.get("published_at"),
         "source": "github",
     }
+
+
+@app.get("/api/app/version")
+async def app_version() -> dict[str, Any]:
+    """
+    리더 앱 인앱 업데이트용. APK는 GitHub Releases(무료·무제한)에 호스팅하고
+    서버는 그 최신 릴리스를 중계한다. 서버가 죽어도 앱은 GitHub을 직접 볼 수 있다.
+    """
+    return await _release_info(want_copy=False)
+
+
+@app.get("/api/copy/app/version")
+async def copy_app_version() -> dict[str, Any]:
+    """팔로워 앱 인앱 업데이트용. copy 표시가 붙은 APK 만 고른다."""
+    return await _release_info(want_copy=True)
 
 
 @app.get("/api/meta")
@@ -373,16 +409,8 @@ async def panic_all() -> dict[str, Any]:
 
 # ------------------------------------------------------------ 잔고 그래프
 
-# 기간별 조회 창과 묶음 단위.
-# 일별=최근 24시간을 1시간 단위, 주별=7일을 1일, 월별=30일을 1일,
-# 분기/연간은 더 길게 묶어 점 개수를 100개 안팎으로 유지한다.
-BALANCE_PERIODS: dict[str, tuple[int, int, str]] = {
-    "day":     (86400,          3600,   "최근 24시간 · 1시간 단위"),
-    "week":    (7 * 86400,      86400,  "최근 7일 · 1일 단위"),
-    "month":   (30 * 86400,     86400,  "최근 30일 · 1일 단위"),
-    "quarter": (90 * 86400,     3 * 86400, "최근 90일 · 3일 단위"),
-    "year":    (365 * 86400,    7 * 86400, "최근 1년 · 1주 단위"),
-}
+# 기간 정의는 store.BALANCE_PERIODS 하나로 통일한다
+# (팔로워 그래프도 같은 눈금을 써야 비교가 된다).
 
 
 @app.get("/api/balance/history", dependencies=[Depends(require_token)])
@@ -450,6 +478,67 @@ async def balance_periods() -> dict[str, Any]:
             for k, v in BALANCE_PERIODS.items()
         ]
     }
+
+
+# ------------------------------------------------- 팔로워 관리 (리더 전용)
+#
+# 여기 있는 엔드포인트는 전부 require_token 을 지난다 = 리더 기기만 호출할 수
+# 있다. 팔로워 토큰은 store.verify_token 에서 걸러지므로 팔로워가 다른
+# 팔로워를 들여다볼 수 없다.
+
+class InviteRequest(BaseModel):
+    label: str = ""
+    maxUses: int = Field(default=1, ge=1, le=1000)
+    ttlHours: float | None = Field(default=None, gt=0)
+
+
+@app.get("/api/invites", dependencies=[Depends(require_token)])
+async def list_invites() -> dict[str, Any]:
+    return {"invites": store.list_invites()}
+
+
+@app.post("/api/invites", dependencies=[Depends(require_token)])
+async def create_invite(req: InviteRequest) -> dict[str, Any]:
+    """팔로워를 초대할 1회용 코드를 만든다. 이 코드로 앱이 가입한다."""
+    invite = store.create_invite(
+        req.label.strip(), req.maxUses,
+        req.ttlHours * 3600 if req.ttlHours else None,
+    )
+    supervisor.publish("info", f"초대코드 발급: {invite['code']}")
+    return invite
+
+
+@app.delete("/api/invites/{code}", dependencies=[Depends(require_token)])
+async def delete_invite(code: str) -> dict[str, Any]:
+    store.delete_invite(code)
+    return {"ok": True}
+
+
+@app.get("/api/followers", dependencies=[Depends(require_token)])
+async def list_followers() -> dict[str, Any]:
+    """팔로워 목록. API 키는 마스킹된 것만 나온다."""
+    return {"followers": copy_manager.status_all()}
+
+
+@app.post("/api/followers/{follower_id}/stop", dependencies=[Depends(require_token)])
+async def stop_follower(follower_id: int) -> dict[str, Any]:
+    """리더가 팔로워의 카피를 정지시킨다. 포지션은 건드리지 않는다."""
+    runner = copy_manager.get(follower_id)
+    result = await runner.stop()
+    copy_manager.publish(follower_id, "warn", "서버 관리자가 카피를 정지했습니다.")
+    return result
+
+
+@app.delete("/api/followers/{follower_id}", dependencies=[Depends(require_token)])
+async def delete_follower(follower_id: int) -> dict[str, Any]:
+    """
+    팔로워 계정 삭제 — 키·기기·로그·잔고기록이 전부 지워진다.
+
+    포지션은 청산하지 않는다. 남의 계좌를 리더가 임의로 정리해서는 안 된다.
+    """
+    await copy_manager.delete(follower_id)
+    supervisor.publish("warn", f"팔로워 #{follower_id} 삭제됨")
+    return {"ok": True}
 
 
 # ------------------------------------------------------------------ 이벤트

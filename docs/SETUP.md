@@ -156,15 +156,73 @@ Actions가 APK를 빌드해 Releases에 올립니다.
 
 ---
 
-## 4. 앱 설치
+## 4. 앱 설치 (리더)
 
-1. GitHub Releases에서 APK 다운로드 → 폰에서 설치
+릴리스에는 APK가 **두 개** 올라옵니다. 리더는 앞의 것을 받습니다.
+
+| APK | 누구용 |
+|---|---|
+| `elemensha-<버전>.apk` | **리더** — 봇을 직접 돌리는 사람 |
+| `elemensha-copy-<버전>.apk` | 팔로워 — 리더의 매매를 카피하는 사람 |
+
+1. GitHub Releases에서 `elemensha-<버전>.apk` 다운로드 → 폰에서 설치
    (‘알 수 없는 앱 설치’ 1회 허용 필요)
 2. 앱 실행 → 서버 주소 `https://내서브도메인.duckdns.org` + 페어링 코드 입력
 3. **더보기 > API 키**에서 바이낸스 키 등록 → 잔고가 뜨면 연결 성공
 4. **설정** 탭에서 파라미터 지정 후 봇 시작
 
 이후 새 버전은 **더보기 > 앱 업데이트**에서 갱신합니다.
+
+---
+
+## 5. 팔로워 붙이기 (카피 트레이딩)
+
+리더 봇이 잘 돌기 시작한 다음에 한다.
+
+### 5-1. 초대코드 발급 (리더가)
+
+```bash
+curl -X POST https://<도메인>/api/invites   -H "Authorization: Bearer <리더 앱 토큰>"   -H "Content-Type: application/json"   -d '{"label":"친구1","maxUses":1,"ttlHours":24}'
+```
+
+응답의 `code`(`A1B2-C3D4` 꼴)를 팔로워에게 전달한다. 1회용이라 가입하면 소진된다.
+
+### 5-2. 팔로워 앱 설치 (팔로워가)
+
+릴리스에서 **`elemensha-copy-<버전>.apk`** 를 받는다.
+`elemensha-<버전>.apk` 는 리더용이니 헷갈리지 말 것. 둘은 별개 앱이라
+한 기기에 함께 깔 수 있다.
+
+1. 앱을 열고 서버 주소 + 초대코드 입력 → 가입
+2. **더보기 > API 키** 에서 자기 바이낸스 키 등록
+   - **출금 권한 없이** 선물 거래 권한만
+   - 가능하면 서버 공인 IP 화이트리스트
+3. **설정** 에서 주문 크기 방식 선택
+   - 자산 비례 / 고정 배수 / 고정 금액
+4. **설정 > 모의 실행** 을 켜고 며칠 돌려 금액이 의도대로 나오는지 확인
+5. 확인되면 모의 실행을 끄고 **카피 시작**
+
+### 5-3. 리더가 팔로워를 볼 때
+
+```bash
+curl https://<도메인>/api/followers -H "Authorization: Bearer <리더 토큰>"
+```
+
+팔로워의 API 키는 마스킹된 값만 나온다. 잔고·포지션·로그는 아예 보이지 않는다.
+문제가 있으면 정지(`POST /api/followers/<id>/stop`)나 삭제
+(`DELETE /api/followers/<id>`)는 할 수 있지만, 팔로워의 포지션을 대신
+청산할 수는 없다. 청산은 팔로워가 자기 앱의 [계좌 > 긴급 청산]으로 한다.
+
+### 5-4. 팔로워 자산이 작을 때
+
+BTC의 실질 최소 주문액은 `0.001 × 가격` 이라 가격이 $110,000이면 $110이다.
+자산 비례 배율로 계산한 금액이 여기 못 미치면 기본 설정에서는 **건너뛴다**.
+[계좌] 화면과 로그에 이유가 남는다. 방법은 셋 중 하나다.
+
+- 최소 주문액이 작은 알트코인만 따라가도록 [설정 > 따라갈 종목] 에서 고른다
+- 레버리지를 올려 같은 증거금으로 더 큰 명목가치를 잡는다 (위험도 함께 커진다)
+- [설정 > 최소 주문금액에 못 미칠 때] 를 '최소 금액으로 올려 매수'로 바꾼다
+  (의도한 배율보다 훨씬 큰 주문이 나가므로 권장하지 않는다)
 
 ---
 
@@ -180,6 +238,14 @@ JAVA_HOME="/c/Program Files/Eclipse Adoptium/jdk-17.0.20.8-hotspot" \
   /c/Users/eleme/AppData/Local/Gradle/gradle-8.11.1/bin/gradle assembleDebug
 ```
 
+모듈이 둘입니다. `assembleDebug` 는 둘 다 만들고, 하나만 필요하면
+`:app:assembleDebug` 또는 `:copyapp:assembleDebug` 를 씁니다.
+
+| 모듈 | 결과물 | 앱 |
+|---|---|---|
+| `:app` | `app/build/outputs/apk/` | 리더 |
+| `:copyapp` | `copyapp/build/outputs/apk/` | 팔로워 |
+
 Android Studio로 열 때는 **Settings > Build Tools > Gradle > Gradle JDK**를
 **17**로 바꿔야 합니다. 번들 JBR 25는 Gradle 8.11이 지원하지 않습니다.
 
@@ -193,6 +259,8 @@ Android Studio로 열 때는 **Settings > Build Tools > Gradle > Gradle JDK**를
 ` 로 읽는다 | `.gitattributes` 로 `*.sh eol=lf` 강제 + `upload.sh` 가 업로드 직후 CR 제거 |
 | SSH 가 `banner exchange` 에서 타임아웃 | **메모리 고갈**. 498MB 머신에서 `dnf list` 같은 명령 하나로도 sshd 가 fork 실패 | 콘솔에서 **Reboot**. 무거운 명령을 직접 실행하지 말 것 |
 | ARM 인스턴스 `Out of capacity` | 도쿄 리전 A1.Flex 품절. AD 는 AD-1 하나뿐이라 우회 불가 | 시간대를 바꿔 재시도하거나 micro 로 진행 |
+| Kotlin 이 `Unclosed comment` 로 파일 끝에서 터짐 | KDoc 본문에 `/api/copy/*` 처럼 `/*` 를 썼다. Kotlin 블록 주석은 **중첩**되므로 안쪽 주석이 열리고 바깥이 안 닫힌다 | 주석 안에서는 경로를 `/api/copy/` 처럼 쓰거나 백틱으로 감싼다 |
+| 팔로워 앱이 리더 APK 를 받아 깔려 함 | 릴리스에 APK 가 둘인데 앱이 첫 번째 `.apk` 자산을 집었다 | 이름으로 구분한다 — `elemensha-copy-` 가 붙은 쪽이 팔로워용 (`main.py` 의 `COPY_APK_MARKER`) |
 | 인스턴스가 `Stopping` 에서 멈춤 | 메모리 부족으로 OS 가 종료 신호에 응답 못 함 | 5분 넘으면 **Actions > Reset** |
 
 ### 서버에서 직접 명령을 실행할 때

@@ -127,6 +127,87 @@ class StrategyConfig:
         return asdict(self)
 
 
+
+# --------------------------------------------------------- 익절 주문 (공용)
+#
+# 리더 봇과 팔로워 카피 엔진이 똑같은 규칙으로 익절 주문을 관리해야 한다.
+# 두 벌로 나눠 쓰면 한쪽만 고쳐지는 순간 팔로워의 청산이 조용히 어긋난다.
+
+def find_live_tp(ex: BinanceFutures, symbol: str) -> dict[str, Any] | None:
+    """거래소에 실제로 살아있는 reduceOnly 매도 주문."""
+    for order in ex.open_orders(symbol):
+        if order.get("side") != "sell":
+            continue
+        info = order.get("info", {})
+        reduce_only = (order.get("reduceOnly")
+                       or str(info.get("reduceOnly", "")).lower() == "true")
+        if reduce_only or order.get("type") == "limit":
+            return order
+    return None
+
+
+def sync_take_profit(
+    ex: BinanceFutures,
+    symbol: str,
+    position_size: float,
+    entry_price: float,
+    take_profit_percent: float,
+    dry_run: bool = False,
+    log: Callable[[str, str, dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """
+    평단 x (1 + 익절률) 에 reduceOnly 지정가 전량 매도를 '있어야 할 상태'로 맞춘다.
+
+    목표가/수량이 거래소의 현재 주문과 같으면 아무것도 하지 않는다.
+    무조건 취소 후 재등록하면 API 낭비이기도 하지만, 그보다 취소와 재등록
+    사이에 익절 주문이 비는 순간이 하루 수천 번 생기는 게 진짜 문제다.
+
+    반환: {"status", "orderId", "price", "amount"}
+      status = cleared | unchanged | placed
+    """
+    say = log or (lambda level, message, data: None)
+    live = find_live_tp(ex, symbol)
+
+    if position_size <= 0:
+        if live:
+            ex.cancel(live["id"], symbol)
+            say("info", "포지션 없음 - 잔여 청산주문 취소", {})
+        return {"status": "cleared", "orderId": None, "price": None, "amount": None}
+
+    raw_price = entry_price * (1 + take_profit_percent)
+    want_price = float(ex.client.price_to_precision(symbol, raw_price))
+    want_amount = float(ex.client.amount_to_precision(symbol, position_size))
+
+    if live:
+        have_price = float(live.get("price") or 0.0)
+        have_amount = float(live.get("amount") or 0.0)
+        spec = ex.spec(symbol)
+        tick = spec.price_tick or 1e-9
+        step = spec.qty_step or 1e-12
+        same = (abs(have_price - want_price) < tick / 2
+                and abs(have_amount - want_amount) < step / 2)
+        if same:
+            return {"status": "unchanged", "orderId": live["id"],
+                    "price": have_price, "amount": have_amount}
+        ex.cancel(live["id"], symbol)
+        say("info",
+            f"익절 주문 갱신: {have_price} x{have_amount} "
+            f"-> {want_price} x{want_amount}", {})
+
+    if dry_run:
+        return {"status": "placed", "orderId": "dry-run",
+                "price": want_price, "amount": want_amount}
+
+    order = ex.limit_sell_reduce_only(symbol, want_amount, want_price)
+    order_id = order.get("id")
+    say("info",
+        f"익절 지정가 등록 {want_price} x{want_amount} "
+        f"(평단 {entry_price} +{take_profit_percent:.2%})",
+        {"price": want_price, "amount": want_amount, "order_id": order_id})
+    return {"status": "placed", "orderId": order_id,
+            "price": want_price, "amount": want_amount}
+
+
 @dataclass
 class TimeframeState:
     last_rsi: float | None = None
@@ -339,75 +420,39 @@ class StrategyEngine:
                  f"- 누적 {state.buy_count}/{cap}",
                  timeframe=timeframe, amount=amount, notional=notional,
                  price=price, order_id=order.get("id"),
-                 buy_count=state.buy_count)
+                 buy_count=state.buy_count,
+                 # 팔로워 카피 엔진이 이 payload 하나만 보고 따라 산다.
+                 # 리더의 지갑잔고를 함께 실어야 '자산 비례' 배율을 계산할 수 있다.
+                 copy_signal={
+                     "symbol": self.symbol,
+                     "action": "buy",
+                     "timeframe": timeframe,
+                     "leaderAmount": amount,
+                     "leaderNotional": notional,
+                     "leaderBalance": balance,
+                     "leaderBuyNotional": self._buy_notional(balance),
+                     "price": price,
+                     "takeProfitPercent": self.cfg.take_profit_percent,
+                     "leverage": self.cfg.leverage,
+                     "marginMode": self.cfg.margin_mode,
+                     "ts": time.time(),
+                 })
         return order
 
     # -------------------------------------------------- 익절 관리 [요구사항 5]
 
-    def _find_live_tp(self) -> dict[str, Any] | None:
-        """거래소에 실제로 살아있는 reduceOnly 매도 주문."""
-        for order in self.ex.open_orders(self.symbol):
-            if order.get("side") != "sell":
-                continue
-            info = order.get("info", {})
-            reduce_only = (order.get("reduceOnly")
-                           or str(info.get("reduceOnly", "")).lower() == "true")
-            if reduce_only or order.get("type") == "limit":
-                return order
-        return None
-
     def reconcile_take_profit(self, position_size: float,
                               entry_price: float) -> str:
-        """
-        요구사항 5의 핵심.
-        목표 익절가/수량이 거래소의 현재 주문과 같으면 아무것도 하지 않는다.
-        (원본은 무조건 취소 후 재등록 -> 하루 1,440회 낭비 + 무방비 구간 발생)
-        """
-        live = self._find_live_tp()
-
-        if position_size <= 0:
-            if live:
-                self.ex.cancel(live["id"], self.symbol)
-                self.log("info", "포지션 없음 - 잔여 청산주문 취소")
-            self.tp_order_id = self.tp_price = self.tp_amount = None
-            return "cleared"
-
-        raw_price = entry_price * (1 + self.cfg.take_profit_percent)
-        want_price = float(self.ex.client.price_to_precision(self.symbol, raw_price))
-        want_amount = float(
-            self.ex.client.amount_to_precision(self.symbol, position_size)
+        """공용 sync_take_profit 에 위임하고 결과만 엔진 상태에 반영한다."""
+        result = sync_take_profit(
+            self.ex, self.symbol, position_size, entry_price,
+            self.cfg.take_profit_percent, self.cfg.dry_run,
+            lambda level, message, data: self.log(level, message, **data),
         )
-
-        if live:
-            have_price = float(live.get("price") or 0.0)
-            have_amount = float(live.get("amount") or 0.0)
-            tick = self.ex.spec(self.symbol).price_tick or 1e-9
-            step = self.ex.spec(self.symbol).qty_step or 1e-12
-            same = (abs(have_price - want_price) < tick / 2
-                    and abs(have_amount - want_amount) < step / 2)
-            if same:
-                self.tp_order_id = live["id"]
-                self.tp_price, self.tp_amount = have_price, have_amount
-                return "unchanged"          # <- API 쓰기 호출 0회
-            self.ex.cancel(live["id"], self.symbol)
-            self.log("info",
-                     f"익절 주문 갱신: {have_price} x{have_amount} "
-                     f"-> {want_price} x{want_amount}")
-
-        if self.cfg.dry_run:
-            self.tp_order_id, self.tp_price, self.tp_amount = (
-                "dry-run", want_price, want_amount
-            )
-            return "placed"
-
-        order = self.ex.limit_sell_reduce_only(self.symbol, want_amount, want_price)
-        self.tp_order_id = order.get("id")
-        self.tp_price, self.tp_amount = want_price, want_amount
-        self.log("info",
-                 f"익절 지정가 등록 {want_price} x{want_amount} "
-                 f"(평단 {entry_price} +{self.cfg.take_profit_percent:.2%})",
-                 price=want_price, amount=want_amount, order_id=self.tp_order_id)
-        return "placed"
+        self.tp_order_id = result["orderId"]
+        self.tp_price = result["price"]
+        self.tp_amount = result["amount"]
+        return result["status"]
 
     # ------------------------------------------------------------------ 틱
 

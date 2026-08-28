@@ -29,7 +29,18 @@ jobs:
           c = StrategyConfig(); c.validate()
           assert c.max_additional_buys is None
           routes = {r.path for r in app.routes}
-          for p in ('/api/health','/api/meta','/api/bots/start','/api/symbols'):
+          for p in ('/api/health','/api/meta','/api/bots/start','/api/symbols',
+                    '/api/copy/join','/api/copy/status','/api/copy/orders',
+                    '/api/copy/account','/api/copy/config','/api/followers',
+                    '/api/invites','/ws/copy'):
               assert p in routes, p
+          from app.copy import SizingMode, BelowMinimum
+          assert len(SizingMode.ALL) == 3, SizingMode.ALL
+          assert len(BelowMinimum.ALL) == 2
           print('서버 검증 통과')
           "
+
+      - name: 카피 트레이딩 테스트
+        run: |
+          python tests/test_copy_api.py
+          python tests/test_copy_flow.py

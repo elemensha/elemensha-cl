@@ -22,3 +22,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "elemensha"
 include(":app")
+include(":copyapp")

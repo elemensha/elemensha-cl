@@ -1,7 +1,16 @@
 # elemensha
 
-바이낸스 USDⓈ-M 선물 RSI DCA 봇 — 서버 + 안드로이드 원격조종 앱.
+바이낸스 USDⓈ-M 선물 RSI DCA 봇 — 서버 + 안드로이드 원격조종 앱 + **카피 트레이딩**.
 **월 운영비 $0** (Oracle Cloud Always Free + GitHub Actions/Releases).
+
+앱은 두 개다.
+
+| 앱 | 패키지 | 누구용 |
+|---|---|---|
+| **elemensha** | `com.elemensha.app` | 리더 — 봇을 직접 돌린다 |
+| **elemensha copy** | `com.elemensha.copy` | 팔로워 — 리더의 매매를 자기 계정으로 따라 한다 |
+
+서버는 하나다. 팔로워는 리더 서버에 초대코드로 가입하고 자기 API 키를 등록한다.
 
 ---
 
@@ -11,15 +20,21 @@
 그래서 **봇은 서버에서 24시간 돌고, 앱은 원격조종기**로 만든다.
 
 ```
- [안드로이드 앱]                    [Oracle Cloud Always Free VM]
-  elemensha            HTTPS         Caddy (무료 자동 TLS)
-  - 파라미터 설정   ──────────────▶      │
-  - 실시간 RSI/포지션   WebSocket        ▼
-  - 시작/정지/긴급청산 ◀──────────   FastAPI  ──▶ 바이낸스 선물 API
-  - 인앱 업데이트                      SQLite (설정·상태·로그)
-        │                              암호화된 API 키
+ [elemensha]  리더 앱                [Oracle Cloud Always Free VM]
+  - 파라미터 설정      HTTPS          Caddy (무료 자동 TLS)
+  - 실시간 RSI/포지션 ──────────▶          │
+  - 시작/정지/긴급청산   WebSocket         ▼
+  - 초대코드 발급     ◀──────────      FastAPI ──▶ 리더 바이낸스 계정
+                                          │
+ [elemensha copy]  팔로워 앱               │  매수 신호
+  - 내 자산/포지션     HTTPS               ▼
+  - 내 지정가 주문   ──────────▶      카피 엔진 ──▶ 팔로워 A 바이낸스 계정
+  - 주문 크기 방식      WebSocket                └▶ 팔로워 B 바이낸스 계정
+  - 시작/정지/긴급청산 ◀──────────
+                                     SQLite (설정·상태·로그·잔고)
+        │                            Fernet 암호화된 API 키 (계정별 분리)
         ▼
-  GitHub Releases (APK 무료 호스팅)
+  GitHub Releases (APK 2종 무료 호스팅)
         ▲
   GitHub Actions (APK 무료 빌드)
 ```
@@ -47,12 +62,17 @@
 ```
 server/
 ├── app/
-│   ├── main.py       FastAPI — REST + WebSocket
+│   ├── main.py       FastAPI — REST + WebSocket, 리더용 팔로워 관리
 │   ├── engine.py     심볼별 봇 감독자 (asyncio)
-│   ├── strategy.py   RSI DCA 전략 엔진
+│   ├── strategy.py   RSI DCA 전략 엔진 + 익절 주문 공용 로직
+│   ├── copy.py       카피 엔진 — 사이징·미러링·팔로워 수명주기
+│   ├── copy_api.py   팔로워 전용 API (토큰으로 범위 강제)
 │   ├── exchange.py   바이낸스 선물 래퍼 (심볼/정밀도/최소금액/레버리지)
-│   ├── store.py      SQLite + API 키 암호화(Fernet)
+│   ├── store.py      SQLite + API 키 암호화(Fernet), 테넌트 격리
 │   └── config.py     환경변수 설정
+├── tests/
+│   ├── test_copy_api.py    권한 격리·초대코드·마이그레이션
+│   └── test_copy_flow.py   신호→매수→익절→복구 (가짜 거래소)
 └── deploy/
     ├── oracle-setup.sh    VM 원클릭 설치
     ├── elemensha.service  systemd (자동재시작 + 하드닝)
@@ -163,6 +183,151 @@ sudo bash /opt/elemensha-claude-bot/server/deploy/oracle-setup.sh
 
 ---
 
+## 카피 트레이딩
+
+리더 봇이 매수하면 팔로워 계정들이 각자의 배율로 같은 종목을 따라 산다.
+팔로워는 **리더 서버에 세들어 사는 별개 테넌트**다.
+
+### 진입은 따라가고, 청산은 각자 한다
+
+이게 이 구현의 핵심 결정이다.
+
+| | 동작 |
+|---|---|
+| 리더 매수 | 팔로워도 즉시 시장가 매수 (배율 적용) |
+| 팔로워 익절 | **팔로워 자기 평단** × (1 + 익절률) 에 자기 reduceOnly 지정가 |
+| 리더 익절 완료 | 팔로워 지정가는 **그대로 유지** — 강제 청산하지 않는다 |
+| 손절 | 없음 (리더 전략과 동일) |
+
+리더의 익절가를 그대로 베끼지 않는 이유: 체결가가 미세하게 달라 평단이
+어긋나므로, 베끼면 팔로워는 자기 목표보다 낮은 값에 팔게 된다.
+리더가 먼저 익절돼도 팔로워를 시장가로 밀어내지 않는 이유: 손실이 확정된다.
+이 상태(`waitingAlone`)는 이상이 아니라 정상이며, 앱에 그대로 표시된다.
+
+### 주문 크기 — 앱에서 세 방식 중 선택
+
+| 방식 | 계산 | 쓰임 |
+|---|---|---|
+| **자산 비례** *(기본)* | 내 순자산 ÷ 리더 잔고 × 보정값 | 자산이 리더의 1/10이면 주문도 1/10 |
+| **고정 배수** | 리더 수량 × N | 0.5 = 절반, 2 = 두 배 |
+| **고정 금액** | 매번 정해진 USDT | 리더가 몇 번을 사든 나는 항상 $N |
+
+세 방식 모두 내부적으로 **배율 하나**로 환산된다. 그래야 배율 상한과
+포지션 상한 같은 안전장치를 한 군데에서 일관되게 걸 수 있다.
+
+### 최소 주문금액 처리
+
+팔로워 자산이 작으면 계산된 주문액이 거래소 최소치에 못 미친다.
+BTC는 `minQty 0.001 × 가격`이 실질 최소라 가격이 $110,000이면 $110이다.
+
+- **건너뛰기** *(기본)* — 사지 않고 이유를 로그와 [계좌] 화면에 남긴다.
+- **최소 금액으로 올림** — 최소치까지 올려 산다. 의도한 배율보다 훨씬
+  커질 수 있어 기본값이 아니다.
+
+### 안전장치
+
+| 항목 | 기본값 | 효과 |
+|---|---|---|
+| 배율 상한 | 없음 | 리더 대비 배율이 이 값을 넘지 않는다 |
+| 종목별 포지션 상한 | 없음 | 이 금액에 닿으면 추가 매수 중단 |
+| 모의 실행 | 꺼짐 | 실제 주문 없이 계산 결과만 로그에 남긴다 |
+
+### 격리 — 누가 무엇을 볼 수 있나
+
+| | 리더 | 팔로워 본인 | 다른 팔로워 |
+|---|---|---|---|
+| 팔로워 API 키 | 마스킹만 | 마스킹만 | ✗ |
+| 팔로워 잔고·포지션·주문 | ✗ | ✓ | ✗ |
+| 팔로워 로그 | ✗ | ✓ | ✗ |
+| 팔로워 카피 정지·계정 삭제 | ✓ | ✓ | ✗ |
+| 팔로워 포지션 청산 | ✗ | ✓ | ✗ |
+| 리더 봇 제어·리더 잔고 | ✓ | ✗ | ✗ |
+
+토큰에서 뽑은 `follower_id` 로 모든 조회 범위가 강제된다. 경로나 본문으로
+받은 id 는 신뢰하지 않는다. 리더는 팔로워를 **정지·삭제**할 수 있지만
+**청산**은 못 한다 — 남의 계좌를 대신 정리해서는 안 되기 때문이다.
+
+리더 토큰과 팔로워 토큰은 같은 `devices` 테이블에 살되 `follower_id` 로
+갈린다. `store.verify_token()` 은 `follower_id IS NULL` 인 리더 토큰만
+통과시키므로, 팔로워 토큰으로는 리더 엔드포인트에 닿을 수 없다.
+
+### 팔로워 초대
+
+```
+리더 앱 (또는 curl)                     팔로워 앱
+  POST /api/invites          ──▶  코드 전달  ──▶  POST /api/copy/join
+  {"label":"친구1","maxUses":1}                    {"code":"A1B2-C3D4"}
+                                                        │
+                                                   토큰 + 계정 생성
+```
+
+초대코드는 1회용이 기본이고 유효기간을 걸 수 있다. 사용 검사와 카운트 증가를
+한 SQL 문 안에서 처리하므로, 동시에 들어온 두 요청이 같은 1회분을 함께
+통과하지 못한다.
+
+```bash
+curl -X POST https://<서버>/api/invites \
+  -H "Authorization: Bearer <리더 토큰>" \
+  -H "Content-Type: application/json" \
+  -d '{"label":"친구1","maxUses":1,"ttlHours":24}'
+```
+
+### 팔로워 앱 화면
+
+| 탭 | 내용 |
+|---|---|
+| 계좌 | 내 순자산·지갑·미실현손익, 포지션(평단·청산가·익절가), 종목별 카피 현황, 긴급 청산 |
+| 주문 | 내 미체결 지정가 — 지정가·현재가·익절까지 남은 거리·부분체결·reduceOnly 여부 |
+| 잔고 | 내 순자산 곡선 (일/주/월/분기/연) |
+| 설정 | 주문 크기 방식, 안전장치, 레버리지·마진, 익절률, 따라갈 종목, 시작/정지 |
+| 더보기 | 내 API 키, 로그, 앱 업데이트, 연결 해제 |
+
+주문·계좌 화면은 서버가 기억하는 값이 아니라 **거래소에 직접 물어본 결과**를
+보여준다. 둘이 어긋나는 순간이 바로 확인이 필요한 순간이기 때문이다.
+
+### 카피 API
+
+전부 팔로워 토큰으로만 접근된다.
+
+| 메서드 | 경로 | 설명 |
+|---|---|---|
+| POST | `/api/copy/join` | 초대코드 → 토큰 + 계정 생성 |
+| GET | `/api/copy/meta` | 사이징 방식·기본값 (인증 불필요) |
+| GET | `/api/copy/me` | 내 계정 정보 |
+| GET/POST/DELETE | `/api/copy/credentials` | 내 API 키 |
+| GET/POST | `/api/copy/config` | 카피 설정 |
+| POST | `/api/copy/start` `/stop` `/panic` | 시작 / 정지 / 내 포지션만 긴급청산 |
+| GET | `/api/copy/status` | 카피 현황 + 리더 종목 목록 |
+| GET | `/api/copy/account` | 내 계좌 (거래소 실시간) |
+| GET | `/api/copy/orders` | 내 미체결 주문 (거래소 실시간) |
+| GET | `/api/copy/positions` | 내 포지션 (거래소 실시간) |
+| GET | `/api/copy/balance/history` | 내 잔고 곡선 |
+| GET | `/api/copy/events` | 내 로그 |
+| WS | `/ws/copy?token=` | 내 실시간 스트림 |
+| GET | `/api/copy/app/version` | 팔로워 APK 최신 버전 |
+
+리더 전용 관리 엔드포인트:
+
+| 메서드 | 경로 | 설명 |
+|---|---|---|
+| GET/POST | `/api/invites` | 초대코드 목록 / 발급 |
+| DELETE | `/api/invites/{code}` | 초대코드 폐기 |
+| GET | `/api/followers` | 팔로워 목록 (키는 마스킹) |
+| POST | `/api/followers/{id}/stop` | 카피 정지 |
+| DELETE | `/api/followers/{id}` | 계정 삭제 (포지션은 건드리지 않음) |
+
+### 테스트
+
+거래소 없이 전 경로를 검증한다. CI 에서 매 푸시마다 돈다.
+
+```bash
+cd server
+python tests/test_copy_api.py    # 권한 격리·초대코드·마이그레이션 45건
+python tests/test_copy_flow.py   # 신호→매수→익절→복구 전 경로 36건
+```
+
+---
+
 ## 안드로이드 앱
 
 ### 빌드 환경 (실측 확인됨)
@@ -195,26 +360,43 @@ sdk.dir=C:/Users/eleme/AppData/Local/Android/Sdk
 
 ### 빌드
 
+두 모듈이 한 프로젝트에 있다. `assembleRelease` 는 둘 다 만든다.
+
 ```bash
 cd /c/Users/eleme/dev/elemensha-android
 JAVA_HOME="/c/Program Files/Eclipse Adoptium/jdk-17.0.20.8-hotspot" \
-  /c/Users/eleme/AppData/Local/Gradle/gradle-8.11.1/bin/gradle assembleDebug
+  /c/Users/eleme/AppData/Local/Gradle/gradle-8.11.1/bin/gradle assembleRelease
 ```
 
-### 화면
+`:app` 만 또는 `:copyapp` 만 빌드하려면 태스크 앞에 모듈명을 붙인다
+(`gradle :copyapp:assembleDebug`).
+
+### 화면 (리더 앱)
 
 | 탭 | 내용 |
 |---|---|
 | 대시보드 | 봇별 포지션·평단·미실현손익·청산가, 봉별 RSI, 정지/긴급청산 |
+| 잔고 | 순자산 곡선 |
 | 설정 | 위 파라미터 전부 + 레버리지·마진 적용 및 검증 결과 |
 | 로그 | 실시간 이벤트 (WebSocket) |
 | 더보기 | API 키 등록, 인앱 업데이트, 연결 해제 |
 
+팔로워 앱 화면은 [카피 트레이딩](#팔로워-앱-화면) 절 참고.
+
 ### 배포
 
 APK 최초 1회는 직접 설치하고, 이후에는 앱 안의 **더보기 > 앱 업데이트**로 갱신한다.
-`git tag v1.0.1 && git push origin v1.0.1` 하면 GitHub Actions 가 APK 를 빌드해
-Releases 에 올리고, 앱이 그것을 받아 설치한다.
+`git tag v1.0.1 && git push origin v1.0.1` 하면 GitHub Actions 가 APK **2종**을
+빌드해 Releases 에 올리고, 각 앱이 자기 것을 받아 설치한다.
+
+| 릴리스 자산 | 받는 앱 | 서버 경로 |
+|---|---|---|
+| `elemensha-1.0.1.apk` | 리더 | `/api/app/version` |
+| `elemensha-copy-1.0.1.apk` | 팔로워 | `/api/copy/app/version` |
+
+> `elemensha-copy-` 라는 이름 규칙으로 서버가 둘을 구분한다
+> (`main.py` 의 `COPY_APK_MARKER`). 규칙을 바꾸면 팔로워 앱의 인앱
+> 업데이트가 리더 APK 를 받아 깔려 든다.
 
 ---
 
@@ -245,3 +427,14 @@ Releases 에 올리고, 앱이 그것을 받아 설치한다.
 - 앱↔서버는 **HTTPS 필수**. 평문 http로 키를 보내지 말 것.
 - 바이낸스 API 키 발급 시 **출금 권한은 절대 켜지 말 것**. 선물 거래 권한만.
 - 가능하면 **IP 화이트리스트**에 서버 공인 IP만 등록.
+
+### 카피 트레이딩을 쓸 때
+
+- 팔로워의 API 키가 **리더 서버에 보관**된다. 이 서버를 운영하는 사람은
+  남의 거래 권한을 맡고 있는 것이다. 초대는 신뢰하는 상대에게만.
+- 팔로워도 **출금 권한 없는 선물 전용 키**를 써야 한다. 그러면 서버가
+  뚫려도 자금을 빼갈 수는 없다.
+- 서버 파일시스템의 `master.key` 하나가 모든 팔로워 키를 푼다.
+  이 파일은 백업에 넣지 말 것.
+- 처음 붙이는 팔로워는 **테스트넷** 또는 **모의 실행**으로 며칠 돌려
+  주문 금액이 의도대로 나오는지 확인하고 실거래로 넘어가는 게 안전하다.
