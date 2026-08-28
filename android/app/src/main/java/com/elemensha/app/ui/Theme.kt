@@ -46,10 +46,27 @@ private val DarkColors = darkColorScheme(
     outlineVariant = Color(0xFF23232A),
 )
 
+// 밝은 배경용. background/surface 와 그 위의 글자색을 반드시 함께 지정한다 —
+// 한쪽만 정하면 기본값과 섞여 '검정 바탕에 검정 글씨' 같은 조합이 나온다.
 private val LightColors = lightColorScheme(
     primary = Color(0xFF3F6B1C),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFDCEFC8),
+    onPrimaryContainer = Color(0xFF1B3A0E),
     secondary = Color(0xFF1F5FBF),
+    onSecondary = Color.White,
     error = LossRed,
+    onError = Color.White,
+    errorContainer = Color(0xFFFFE1E1),
+    onErrorContainer = Color(0xFF6B0F16),
+    background = Color.White,
+    onBackground = Color(0xFF16161A),
+    surface = Color.White,
+    onSurface = Color(0xFF16161A),
+    surfaceVariant = Color(0xFFF1F1F4),
+    onSurfaceVariant = Color(0xFF54545E),
+    outline = Color(0xFFC4C4CC),
+    outlineVariant = Color(0xFFE3E3E8),
 )
 
 private val AppTypography = Typography(
@@ -69,6 +86,21 @@ private val AppTypography = Typography(
         fontSize = 12.sp,
     ),
 )
+
+/**
+ * 시스템 테마와 무관하게 항상 밝게 그리는 테마.
+ *
+ * 페어링 화면에만 쓴다. 서버 주소와 페어링 코드를 처음 입력하는 자리라
+ * 기기 설정이 무엇이든 확실히 읽혀야 한다.
+ */
+@Composable
+fun ElemenshaLightTheme(content: @Composable () -> Unit) {
+    MaterialTheme(
+        colorScheme = LightColors,
+        typography = AppTypography,
+        content = content,
+    )
+}
 
 @Composable
 fun ElemenshaTheme(

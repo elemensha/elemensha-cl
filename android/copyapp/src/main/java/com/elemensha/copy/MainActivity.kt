@@ -1,8 +1,10 @@
 package com.elemensha.copy
 
 import android.os.Bundle
+import android.graphics.Color as AndroidColor
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
@@ -40,6 +42,22 @@ class MainActivity : ComponentActivity() {
         setContent {
             ElemenshaCopyTheme {
                 val state by vm.state.collectAsStateWithLifecycle()
+
+                // 가입 화면은 항상 흰 배경이라 상태바 아이콘을 어둡게 강제한다.
+                // 안 그러면 다크 모드 기기에서 흰 아이콘이 흰 배경에 묻힌다.
+                LaunchedEffect(state.joined) {
+                    if (state.joined) {
+                        enableEdgeToEdge()
+                    } else {
+                        enableEdgeToEdge(
+                            statusBarStyle = SystemBarStyle.light(
+                                AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT),
+                            navigationBarStyle = SystemBarStyle.light(
+                                AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT),
+                        )
+                    }
+                }
+
                 if (!state.joined) {
                     JoinScreen(
                         connecting = state.connecting,
