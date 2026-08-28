@@ -43,6 +43,13 @@ data class UiState(
     /** 잔고 그래프 */
     val balanceHistory: BalanceHistory? = null,
     val balancePeriod: String = "week",
+
+    /** 팔로워 관리 */
+    val invites: List<Invite> = emptyList(),
+    val followers: List<FollowerRow> = emptyList(),
+    /** 방금 발급한 코드. 화면에 크게 띄워 바로 공유할 수 있게 한다. */
+    val newInvite: Invite? = null,
+    val followersLoading: Boolean = false,
 )
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
@@ -135,6 +142,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         runCatching { api.credentials() }.onSuccess { c -> update { it.copy(credentials = c) } }
         runCatching { api.bots() }.onSuccess { b -> update { it.copy(bots = b.bots) } }
         runCatching { api.events(200) }.onSuccess { e -> update { it.copy(events = e.events) } }
+        // [더보기] 의 팔로워 수 배지를 채우려면 목록이 먼저 있어야 한다
+        runCatching { api.followers() }
+            .onSuccess { f -> update { it.copy(followers = f.followers) } }
         if (_state.value.credentials.configured) {
             loadSymbols()
             loadBalanceHistory()
@@ -287,6 +297,66 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         update { it.copy(busy = true) }
         runCatching { api.snapshotNow() }
             .onSuccess { update { it.copy(busy = false) }; loadBalanceHistory() }
+            .onFailure { fail(it) }
+    }
+
+    // ------------------------------------------------------ 팔로워 관리
+
+    fun loadFollowers() = viewModelScope.launch {
+        update { it.copy(followersLoading = true) }
+        runCatching { api.followers() }
+            .onSuccess { r -> update { it.copy(followers = r.followers) } }
+            .onFailure { update { s -> s.copy(error = it.message) } }
+        runCatching { api.invites() }
+            .onSuccess { r -> update { it.copy(invites = r.invites) } }
+        update { it.copy(followersLoading = false) }
+    }
+
+    fun createInvite(label: String, maxUses: Int, ttlHours: Double?) =
+        viewModelScope.launch {
+            update { it.copy(busy = true, error = null) }
+            runCatching { api.createInvite(label.trim(), maxUses, ttlHours) }
+                .onSuccess { invite ->
+                    update { it.copy(busy = false, newInvite = invite,
+                                     notice = "초대코드 ${invite.code} 발급됨") }
+                    loadFollowers()
+                }
+                .onFailure { fail(it) }
+        }
+
+    fun dismissNewInvite() = update { it.copy(newInvite = null) }
+
+    fun deleteInvite(code: String) = viewModelScope.launch {
+        update { it.copy(busy = true) }
+        runCatching { api.deleteInvite(code) }
+            .onSuccess {
+                update { s ->
+                    s.copy(busy = false, notice = "초대코드 폐기됨",
+                           // 방금 발급한 코드를 폐기했으면 화면에서도 치운다
+                           newInvite = s.newInvite?.takeIf { it.code != code })
+                }
+                loadFollowers()
+            }
+            .onFailure { fail(it) }
+    }
+
+    fun stopFollower(id: Int, label: String) = viewModelScope.launch {
+        update { it.copy(busy = true, error = null) }
+        runCatching { api.stopFollower(id) }
+            .onSuccess {
+                update { it.copy(busy = false, notice = "$label 카피 정지됨") }
+                loadFollowers()
+            }
+            .onFailure { fail(it) }
+    }
+
+    fun deleteFollower(id: Int, label: String) = viewModelScope.launch {
+        update { it.copy(busy = true, error = null) }
+        runCatching { api.deleteFollower(id) }
+            .onSuccess {
+                update { it.copy(busy = false, notice = "$label 계정 삭제됨") }
+                loadFollowers()
+            }
             .onFailure { fail(it) }
     }
 

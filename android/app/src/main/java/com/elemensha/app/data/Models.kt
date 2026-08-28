@@ -221,6 +221,45 @@ data class Event(
 @Serializable
 data class EventsResponse(val events: List<Event> = emptyList())
 
+// ------------------------------------------------------- 팔로워 관리 (리더용)
+
+/** 팔로워를 초대하는 1회용(또는 N회용) 코드. */
+@Serializable
+data class Invite(
+    val code: String = "",
+    val label: String? = null,
+    val maxUses: Int = 1,
+    val uses: Int = 0,
+    val expiresAt: Double? = null,
+    val createdAt: Double? = null,
+    val exhausted: Boolean = false,
+)
+
+@Serializable
+data class InvitesResponse(val invites: List<Invite> = emptyList())
+
+/**
+ * 내 서버에 붙은 팔로워 한 명.
+ *
+ * 서버는 여기에 팔로워의 잔고·포지션·로그를 담지 않는다. 리더가 볼 수 있는
+ * 건 계정이 살아있는지와 키가 등록됐는지까지다.
+ */
+@Serializable
+data class FollowerRow(
+    val id: Int = 0,
+    val label: String = "",
+    val enabled: Boolean = false,
+    val running: Boolean = false,
+    val createdAt: Double? = null,
+    val sizingMode: String? = null,
+    val credentials: CredentialInfo = CredentialInfo(),
+    val devices: Int = 0,
+    val lastError: String? = null,
+)
+
+@Serializable
+data class FollowersResponse(val followers: List<FollowerRow> = emptyList())
+
 @Serializable
 data class PairResponse(val token: String = "", val serverVersion: String = "")
 

@@ -137,10 +137,14 @@ private fun MainScaffold(vm: AppViewModel) {
                     vm = vm,
                     state = state,
                     onOpenCredentials = { nav.navigate("credentials") },
+                    onOpenFollowers = { nav.navigate("followers") },
                     onOpenUpdate = { nav.navigate("update") },
                 )
             }
             composable("credentials") { CredentialsScreen(vm, state, onBack = { nav.popBackStack() }) }
+            composable("followers") {
+                FollowersScreen(vm, state, onBack = { nav.popBackStack() })
+            }
             composable("update") { UpdateScreen(vm, state, onBack = { nav.popBackStack() }) }
         }
     }

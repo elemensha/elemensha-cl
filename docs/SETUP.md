@@ -181,6 +181,11 @@ Actions가 APK를 빌드해 Releases에 올립니다.
 
 ### 5-1. 초대코드 발급 (리더가)
 
+리더 앱 **더보기 > 팔로워 관리 > 코드 발급**. 메모·사용 횟수·유효기간을 정하면
+코드가 크게 뜨고 **복사**나 **공유**로 바로 전달할 수 있습니다. 1회 / 72시간을 권합니다.
+
+터미널에서 하려면:
+
 ```bash
 curl -X POST https://<도메인>/api/invites   -H "Authorization: Bearer <리더 앱 토큰>"   -H "Content-Type: application/json"   -d '{"label":"친구1","maxUses":1,"ttlHours":24}'
 ```
@@ -203,6 +208,11 @@ curl -X POST https://<도메인>/api/invites   -H "Authorization: Bearer <리더
 5. 확인되면 모의 실행을 끄고 **카피 시작**
 
 ### 5-3. 리더가 팔로워를 볼 때
+
+리더 앱 **더보기 > 팔로워 관리**. 팔로워별로 카피 실행 여부, API 키 등록 여부,
+연결된 기기 수, 마지막 오류가 보이고 **카피 정지**와 **계정 삭제**를 할 수 있습니다.
+
+터미널에서는:
 
 ```bash
 curl https://<도메인>/api/followers -H "Authorization: Bearer <리더 토큰>"

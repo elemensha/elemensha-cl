@@ -32,6 +32,7 @@ fun MoreScreen(
     vm: AppViewModel,
     state: UiState,
     onOpenCredentials: () -> Unit,
+    onOpenFollowers: () -> Unit,
     onOpenUpdate: () -> Unit,
 ) {
     var unpairAsk by remember { mutableStateOf(false) }
@@ -65,6 +66,19 @@ fun MoreScreen(
                 leadingContent = { Icon(Icons.Default.Key, null) },
                 trailingContent = { Icon(Icons.Default.ChevronRight, null) },
                 modifier = Modifier.clickableRow(onOpenCredentials),
+            )
+            ListItem(
+                headlineContent = { Text("팔로워 관리") },
+                supportingContent = {
+                    Text(
+                        if (state.followers.isEmpty()) "초대코드 발급"
+                        else "${state.followers.size}명 · " +
+                             "카피 중 ${state.followers.count { it.running }}명",
+                    )
+                },
+                leadingContent = { Icon(Icons.Default.Group, null) },
+                trailingContent = { Icon(Icons.Default.ChevronRight, null) },
+                modifier = Modifier.clickableRow(onOpenFollowers),
             )
             ListItem(
                 headlineContent = { Text("앱 업데이트") },

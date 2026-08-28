@@ -185,6 +185,32 @@ class Api(private val prefs: Prefs) {
     suspend fun deleteBot(symbol: String): String =
         call(builder("/api/bots/${encode(symbol)}").delete().build())
 
+    // ------------------------------------------------- 팔로워 관리 (리더용)
+
+    suspend fun invites(): InvitesResponse = get("/api/invites")
+
+    /** ttlHours 가 null 이면 만료 없는 코드가 된다. */
+    suspend fun createInvite(label: String, maxUses: Int, ttlHours: Double?): Invite =
+        post(
+            "/api/invites",
+            buildJsonObject {
+                put("label", JsonPrimitive(label))
+                put("maxUses", JsonPrimitive(maxUses))
+                if (ttlHours != null) put("ttlHours", JsonPrimitive(ttlHours))
+            },
+        )
+
+    suspend fun deleteInvite(code: String): String =
+        call(builder("/api/invites/${encode(code)}").delete().build())
+
+    suspend fun followers(): FollowersResponse = get("/api/followers")
+
+    /** 카피만 멈춘다. 팔로워의 포지션과 주문은 건드리지 않는다. */
+    suspend fun stopFollower(id: Int): JsonObject = post("/api/followers/$id/stop")
+
+    suspend fun deleteFollower(id: Int): String =
+        call(builder("/api/followers/$id").delete().build())
+
     // ------------------------------------------------------------ 잔고 그래프
 
     suspend fun balanceHistory(period: String): BalanceHistory =
