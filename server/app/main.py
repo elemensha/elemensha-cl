@@ -35,8 +35,8 @@ logging.basicConfig(
 )
 log = logging.getLogger("elemensha")
 
-APP_VERSION = "1.0.0"
-APP_VERSION_CODE = 1
+APP_VERSION = "1.1.0"
+APP_VERSION_CODE = 10100
 
 store = Store(settings.data_dir)
 supervisor = Supervisor(store)
