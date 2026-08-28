@@ -142,6 +142,11 @@ async def lifespan(_: FastAPI):
     log.info(" elemensha server v%s", APP_VERSION)
     log.info(" 페어링 코드: %s   (앱 최초 연결 시 1회 입력)", code)
     log.info(" 팔로워 계정: %d개", len(store.load_followers()))
+    for row in store.audit_credentials():
+        # 색인이 생기기 전에 만들어진 DB 에서만 나올 수 있는 상태다.
+        # 같은 키를 둘이 쓰면 리더 신호 하나에 주문이 두 번 나간다.
+        log.error(" !! %s 와 %s 가 같은 API 키를 씁니다 - 한쪽을 정리하세요",
+                  row["owner"], row["heldBy"])
     log.info("=" * 58)
     await supervisor.restore_on_boot()
     copy_manager.attach()

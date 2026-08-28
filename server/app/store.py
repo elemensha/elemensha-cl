@@ -8,6 +8,7 @@ SQLite 영속 저장소 + API 키 암호화.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -96,6 +97,12 @@ CREATE TABLE IF NOT EXISTS follower_balance_history (
     PRIMARY KEY (follower_id, ts)
 );
 CREATE INDEX IF NOT EXISTS idx_fbh ON follower_balance_history(follower_id, ts);
+CREATE TABLE IF NOT EXISTS credential_index (
+    key_hash   TEXT PRIMARY KEY,
+    owner      TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_credential_owner ON credential_index(owner);
 """
 
 
@@ -134,6 +141,42 @@ class Store:
             self.db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_events_follower "
                 "ON events(follower_id, id DESC)"
+            )
+        self.db.commit()
+
+        # 이미 등록돼 있던 키들의 해시를 채운다. 비어 있을 때만 돌면 된다.
+        if not self.db.execute(
+            "SELECT 1 FROM credential_index LIMIT 1"
+        ).fetchone():
+            self._backfill_credential_index()
+
+    @staticmethod
+    def _owner_of_secret(name: str) -> str | None:
+        """시크릿 이름 -> 소유자 식별자. 'binance_api_key' -> 'leader'."""
+        if name == "binance_api_key":
+            return LEADER_OWNER
+        if name.startswith("follower:") and name.endswith(":api_key"):
+            return "follower:" + name.split(":")[1]
+        return None
+
+    def _backfill_credential_index(self) -> None:
+        """
+        기존 DB 승격용. 이미 같은 키를 둘이 쓰고 있었다면 먼저 등록된 쪽이
+        소유자로 남는다 — 돌고 있는 봇을 여기서 끊지 않기 위해서다.
+        그 상태는 audit_credentials() 가 부팅 로그로 알려준다.
+        """
+        rows = self.db.execute(
+            "SELECT name FROM secrets WHERE name LIKE '%api_key'"
+        ).fetchall()
+        for row in rows:
+            owner = self._owner_of_secret(row["name"])
+            key = self.get_secret(row["name"]) if owner else None
+            if not owner or not key:
+                continue
+            self.db.execute(
+                "INSERT OR IGNORE INTO credential_index(key_hash, owner,"
+                " updated_at) VALUES(?,?,?)",
+                (credential_hash(key), owner, time.time()),
             )
         self.db.commit()
 
@@ -183,6 +226,57 @@ class Store:
 
     def has_secret(self, name: str) -> bool:
         return self.get_secret(name) is not None
+
+    # ------------------------------------------------------- API 키 소유권
+
+    def credential_owner(self, api_key: str) -> str | None:
+        """이 키를 이미 쓰고 있는 계정. 없으면 None."""
+        row = self.db.execute(
+            "SELECT owner FROM credential_index WHERE key_hash=?",
+            (credential_hash(api_key),),
+        ).fetchone()
+        return row["owner"] if row else None
+
+    def claim_credential(self, api_key: str, owner: str) -> None:
+        """
+        키의 소유자를 등록한다.
+
+        호출 전에 credential_owner() 로 충돌을 확인할 것. 여기서는 막지 않는다 —
+        키를 교체하는 정상 흐름(같은 계정이 다른 키로 갈아탐)도 이 함수를 지난다.
+        """
+        self.release_credential(owner)
+        self.db.execute(
+            "INSERT INTO credential_index(key_hash, owner, updated_at)"
+            " VALUES(?,?,?) ON CONFLICT(key_hash) DO UPDATE SET"
+            " owner=excluded.owner, updated_at=excluded.updated_at",
+            (credential_hash(api_key), owner, time.time()),
+        )
+        self.db.commit()
+
+    def release_credential(self, owner: str) -> None:
+        self.db.execute("DELETE FROM credential_index WHERE owner=?", (owner,))
+        self.db.commit()
+
+    def audit_credentials(self) -> list[dict[str, str]]:
+        """
+        같은 키를 두 계정이 나눠 쓰고 있는지 검사한다.
+
+        색인이 생기기 전에 만들어진 DB 에서만 나올 수 있는 상태다.
+        부팅 때 한 번 찍어 운영자가 알아차리게 한다.
+        """
+        out: list[dict[str, str]] = []
+        rows = self.db.execute(
+            "SELECT name FROM secrets WHERE name LIKE '%api_key'"
+        ).fetchall()
+        for row in rows:
+            owner = self._owner_of_secret(row["name"])
+            key = self.get_secret(row["name"]) if owner else None
+            if not owner or not key:
+                continue
+            holder = self.credential_owner(key)
+            if holder and holder != owner:
+                out.append({"owner": owner, "heldBy": holder})
+        return out
 
     # ------------------------------------------------------------ 일반 KV
 
@@ -529,6 +623,7 @@ class Store:
 
     def delete_follower(self, follower_id: int) -> None:
         """계정을 지우면 키·기기·로그·잔고기록까지 전부 함께 지운다."""
+        self.release_credential("follower:%d" % follower_id)
         self.delete_secret("follower:%d:api_key" % follower_id)
         self.delete_secret("follower:%d:api_secret" % follower_id)
         self.db.execute("DELETE FROM devices WHERE follower_id=?", (follower_id,))
@@ -632,6 +727,26 @@ BALANCE_PERIODS: dict[str, tuple[int, int, str]] = {
     "quarter": (90 * 86400,   3 * 86400, "최근 90일 · 3일 단위"),
     "year":    (365 * 86400,  7 * 86400, "최근 1년 · 1주 단위"),
 }
+
+
+# 소유자 식별자. 팔로워는 'follower:<id>'.
+LEADER_OWNER = "leader"
+
+
+def credential_hash(api_key: str) -> str:
+    """API 키의 조회용 지문. 되돌릴 수 없다."""
+    return hashlib.sha256(api_key.strip().encode()).hexdigest()
+
+
+def describe_owner(owner: str | None) -> str:
+    """오류 메시지에 넣을 사람이 읽는 이름."""
+    if not owner:
+        return "알 수 없는 계정"
+    if owner == LEADER_OWNER:
+        return "리더(봇) 계정"
+    if owner.startswith("follower:"):
+        return f"다른 카피 계정 #{owner.split(':')[1]}"
+    return owner
 
 
 def mask(value: str | None, keep: int = 4) -> str:

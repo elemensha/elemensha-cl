@@ -211,7 +211,7 @@ async def main():
 
     # 팔로워: 자산 $1,000, 리더 $10,000 -> 자산 비례 0.1배
     fid = mgr.create("tester", FollowerConfig(sizing_mode=SizingMode.EQUITY))
-    mgr.set_credentials(fid, "k" * 16, "s" * 16)
+    mgr.set_credentials(fid, "main-account-key", "s" * 16)
     runner = mgr.get(fid)
     follower_ex = FakeExchange(equity=1_000.0)
     mgr.new_exchange = lambda _id: follower_ex        # 진짜 바이낸스 대신
@@ -276,7 +276,8 @@ async def main():
     # 최소 주문금액 미달 -> 건너뛰고 이유를 남긴다
     poor_ex = FakeExchange(equity=5.0)
     fid2 = mgr.create("small", FollowerConfig(sizing_mode=SizingMode.EQUITY))
-    mgr.set_credentials(fid2, "k" * 16, "s" * 16)
+    # 팔로워마다 키가 달라야 한다 — 같은 키는 서버가 거부한다
+    mgr.set_credentials(fid2, "small-account-key", "s" * 16)
     mgr.new_exchange = lambda _id: poor_ex
     runner2 = mgr.get(fid2)
     await runner2.start()
@@ -324,6 +325,122 @@ async def main():
 
 
 asyncio.run(main())
+
+
+# ------------------------------------------ 3) 같은 키를 두 계정이 쓰지 못한다
+
+print("\n[3] 중복 API 키 차단")
+
+
+def dup_key_checks():
+    global ok
+    import tempfile as _tf
+    from pathlib import Path as _P
+
+    from app.exchange import ExchangeError
+    from app.store import LEADER_OWNER
+
+    store = Store(_P(_tf.mkdtemp(prefix="elemensha-dup-")))
+    mgr = CopyManager(store, FakeSupervisor())
+
+    a = mgr.create("첫번째", FollowerConfig())
+    b = mgr.create("재설치본", FollowerConfig())
+    KEY, SECRET = "SAME-API-KEY-0001", "s" * 20
+
+    mgr.set_credentials(a, KEY, SECRET)
+    check("첫 등록은 통과", mgr.has_credentials(a))
+
+    try:
+        mgr.set_credentials(b, KEY, SECRET)
+        check("같은 키로 두번째 계정 등록 차단", False, "예외가 안 났다")
+    except ExchangeError as exc:
+        check("같은 키로 두번째 계정 등록 차단", True)
+        check("오류가 무엇을 하라는지 알려준다",
+              "삭제" in str(exc) and "카피 계정" in str(exc), str(exc))
+    check("차단된 계정에는 키가 안 남는다", not mgr.has_credentials(b))
+
+    # 다른 키는 통과해야 한다
+    mgr.set_credentials(b, "OTHER-API-KEY-0002", SECRET)
+    check("다른 키는 통과", mgr.has_credentials(b))
+
+    # 같은 계정이 같은 키를 다시 등록하는 건 정상 흐름이다
+    mgr.set_credentials(a, KEY, SECRET)
+    check("본인이 같은 키 재등록은 허용", mgr.has_credentials(a))
+
+    # 계정을 지우면 키가 풀려 다른 계정이 쓸 수 있어야 한다
+    store.delete_follower(a)
+    check("삭제하면 소유권도 풀린다", store.credential_owner(KEY) is None)
+    c = mgr.create("새 기기", FollowerConfig())
+    mgr.set_credentials(c, KEY, SECRET)
+    check("풀린 키를 새 계정이 쓸 수 있다", mgr.has_credentials(c))
+
+    # 리더 쪽도 같은 규칙을 받는다.
+    # Supervisor.set_credentials 는 잔고 스냅샷 태스크를 띄우므로
+    # 실제 서버와 같이 이벤트 루프 안에서 불러야 한다.
+    from app.engine import Supervisor
+
+    async def leader_checks():
+        sup = Supervisor(store)
+        try:
+            sup.set_credentials(KEY, SECRET)
+            check("팔로워 키를 리더로 등록 차단", False, "예외가 안 났다")
+        except ExchangeError:
+            check("팔로워 키를 리더로 등록 차단", True)
+
+        sup.set_credentials("LEADER-ONLY-KEY", SECRET)
+        check("리더 전용 키는 통과",
+              store.credential_owner("LEADER-ONLY-KEY") == LEADER_OWNER)
+
+        try:
+            mgr.set_credentials(c, "LEADER-ONLY-KEY", SECRET)
+            check("리더 키를 팔로워로 등록 차단", False, "예외가 안 났다")
+        except ExchangeError as exc:
+            check("리더 키를 팔로워로 등록 차단", True)
+            check("리더 계정임을 알려준다", "리더" in str(exc), str(exc))
+
+        sup.clear_credentials()
+        check("리더가 키를 지우면 소유권도 풀린다",
+              store.credential_owner("LEADER-ONLY-KEY") is None)
+        await sup.shutdown()
+
+    asyncio.run(leader_checks())
+
+    check("중복 없음이 감사에서도 확인된다", store.audit_credentials() == [],
+          store.audit_credentials())
+
+
+dup_key_checks()
+
+
+# ------------------------------- 4) 색인 이전 DB 는 기존 상태를 깨지 않는다
+
+print("\n[4] 구버전 DB 승격")
+
+
+def backfill_checks():
+    import tempfile as _tf
+    from pathlib import Path as _P
+
+    data = _P(_tf.mkdtemp(prefix="elemensha-backfill-"))
+    old = Store(data)
+    fid = old.create_follower("기존", FollowerConfig().to_dict())
+    old.put_secret("binance_api_key", "LEADER-KEY")
+    old.put_secret(f"follower:{fid}:api_key", "FOLLOWER-KEY")
+    # 색인을 통째로 비워 색인 도입 전 DB 를 흉내낸다
+    old.db.execute("DELETE FROM credential_index")
+    old.db.commit()
+    old.db.close()
+
+    fresh = Store(data)
+    check("리더 키 소유권이 채워진다",
+          fresh.credential_owner("LEADER-KEY") == "leader")
+    check("팔로워 키 소유권이 채워진다",
+          fresh.credential_owner("FOLLOWER-KEY") == f"follower:{fid}")
+    check("승격 후 충돌 없음", fresh.audit_credentials() == [],
+          fresh.audit_credentials())
+
+
+backfill_checks()
 
 print(f"\n{'=' * 50}\n통과 {ok}건" + (f", 실패 {len(fail)}건: {fail}" if fail else ""))
 sys.exit(1 if fail else 0)

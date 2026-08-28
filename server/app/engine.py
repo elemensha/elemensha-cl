@@ -13,7 +13,7 @@ import traceback
 from typing import Any, Callable
 
 from .exchange import BinanceFutures, ExchangeError
-from .store import Store
+from .store import LEADER_OWNER, Store, describe_owner
 from .strategy import StrategyConfig, StrategyEngine
 
 
@@ -155,13 +155,29 @@ class Supervisor:
 
     def set_credentials(self, api_key: str, api_secret: str,
                         testnet: bool = False) -> None:
+        """
+        팔로워가 쓰고 있는 키는 리더로 등록할 수 없다.
+
+        같은 계정을 리더 봇과 카피 엔진이 함께 잡으면, 봇이 산 것을 카피가
+        또 따라 사서 의도한 금액의 두 배가 나간다.
+        """
+        holder = self.store.credential_owner(api_key)
+        if holder and holder != LEADER_OWNER:
+            raise ExchangeError(
+                f"이 API 키는 이미 {describe_owner(holder)}에 등록되어 있습니다. "
+                "리더 봇과 카피가 같은 바이낸스 계정을 함께 잡으면 주문이 "
+                "두 번 나갑니다. [더보기 > 팔로워 관리]에서 해당 계정을 "
+                "정리한 뒤 다시 시도하세요."
+            )
         self.store.put_secret("binance_api_key", api_key)
         self.store.put_secret("binance_api_secret", api_secret)
         self.store.put("binance_testnet", bool(testnet))
+        self.store.claim_credential(api_key, LEADER_OWNER)
         self._symbol_cache = None
         self.start_snapshots()
 
     def clear_credentials(self) -> None:
+        self.store.release_credential(LEADER_OWNER)
         self.store.delete_secret("binance_api_key")
         self.store.delete_secret("binance_api_secret")
 

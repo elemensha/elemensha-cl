@@ -29,7 +29,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
 from .exchange import BinanceFutures, ExchangeError
-from .store import Store
+from .store import LEADER_OWNER, Store, describe_owner
 from .strategy import sync_take_profit
 
 
@@ -739,13 +739,36 @@ class CopyManager:
     def _key_name(self, follower_id: int, which: str) -> str:
         return f"follower:{follower_id}:{which}"
 
+    @staticmethod
+    def owner_of(follower_id: int) -> str:
+        return f"follower:{follower_id}"
+
     def set_credentials(self, follower_id: int, api_key: str, api_secret: str,
                         testnet: bool = False) -> None:
+        """
+        같은 키가 다른 계정에 이미 등록돼 있으면 거부한다.
+
+        앱을 다시 설치하면 [연결 해제]가 서버에 알리지 않으므로 계정이 하나
+        더 생긴다. 옛 계정이 키를 쥔 채 살아 있으면 같은 바이낸스 계정에
+        카피 엔진이 둘 붙어 리더 신호 하나에 주문이 두 번 나간다.
+        여기서 막지 않으면 그대로 자금 손실이 된다.
+        """
+        owner = self.owner_of(follower_id)
+        holder = self.store.credential_owner(api_key)
+        if holder and holder != owner:
+            raise ExchangeError(
+                f"이 API 키는 이미 {describe_owner(holder)}에 등록되어 있습니다. "
+                "같은 바이낸스 계정에 두 엔진이 붙으면 리더 신호 하나에 주문이 "
+                "두 번 나갑니다. 앱을 다시 설치하신 경우라면 리더에게 "
+                "[팔로워 관리]에서 예전 계정을 삭제해 달라고 요청하세요."
+            )
         self.store.put_secret(self._key_name(follower_id, "api_key"), api_key)
         self.store.put_secret(self._key_name(follower_id, "api_secret"), api_secret)
         self.store.put(f"follower:{follower_id}:testnet", bool(testnet))
+        self.store.claim_credential(api_key, owner)
 
     def clear_credentials(self, follower_id: int) -> None:
+        self.store.release_credential(self.owner_of(follower_id))
         self.store.delete_secret(self._key_name(follower_id, "api_key"))
         self.store.delete_secret(self._key_name(follower_id, "api_secret"))
 
